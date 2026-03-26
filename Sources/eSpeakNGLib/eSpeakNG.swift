@@ -1,10 +1,10 @@
 import ESpeakNG
 
-//  Kokoro-tts-lib
+//  Kokoro-tts-lib — forked to add multilingual support
 //
 import Foundation
 
-// ESpeakNG wrapper for phonemizing the text strings
+// ESpeakNG wrapper for phonemizing text strings
 public final class eSpeakNG {
   private var languageMapping: [String: String] = [:]
   private var language: Language = .none
@@ -18,11 +18,18 @@ public final class eSpeakNG {
     case couldNotPhonemize
   }
 
-  // Available languages
+  // Available languages — matches Kokoro model's supported languages
   public enum Language: String, CaseIterable {
     case none = ""
     case enUS = "en-us"
     case enGB = "en-gb"
+    case ja = "ja"
+    case zh = "zh"
+    case es = "es"
+    case fr = "fr"
+    case hi = "hi"
+    case it = "it"
+    case pt = "pt-br"
   }
 
   // After constructing the wrapper, call setLanguage() before phonemizing any text
@@ -56,8 +63,9 @@ public final class eSpeakNG {
         index += 1
       }
 
-      try Language.allCases.forEach {
-        if $0.rawValue.count > 0, !languageList.contains($0.rawValue) {
+      // Only validate that at least English is available — other languages are optional
+      for lang in [Language.enUS, Language.enGB] {
+        if !languageList.contains(lang.rawValue) {
           throw ESpeakNGEngineError.languageNotFound
         }
       }
@@ -66,13 +74,11 @@ public final class eSpeakNG {
     }
   }
 
-  // Destructor
   deinit {
     _ = espeak_Terminate()
   }
 
-  // Sets the language that will be used for phonemizing
-  // If the function returns without throwing an exception then consider new language set!
+  // Sets the language for phonemization
   public func setLanguage(language: Language) throws {
     guard let name = languageMapping[language.rawValue]
     else {
@@ -90,7 +96,7 @@ public final class eSpeakNG {
     self.language = language
   }
 
-  // Phonemizes the text string that can then be passed to the next stage
+  // Phonemizes the text string
   public func phonemize(text: String) throws -> String {
     guard language != .none else {
       throw ESpeakNGEngineError.languageNotSet
@@ -120,10 +126,15 @@ public final class eSpeakNG {
     }
   }
 
-  // Post processes manually phonemes before returning them
-  // NOTE: This is currently only for English, handling other langauges requires different kind of postproccessing
+  // Post-process phonemes — English needs specific mappings, other languages pass through
   private func postProcessPhonemes(_ phonemes: String) -> String {
     var result = phonemes.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // Only apply English-specific phoneme mappings for English
+    guard language == .enUS || language == .enGB else {
+      return result
+    }
+
     for (old, new) in Constants.E2M {
       result = result.replacingOccurrences(of: old, with: new)
     }
@@ -148,7 +159,7 @@ public final class eSpeakNG {
     return result.replacingOccurrences(of: "^", with: "")
   }
 
-  // Find the data bundle that is inside the framework
+  // Find the data bundle inside the framework
   private func findDataBundlePath() -> String? {
     if let frameworkBundle = Bundle(identifier: "com.kokoro.espeakng"),
        let dataBundleURL = frameworkBundle.url(forResource: "espeak-ng-data", withExtension: "bundle")
@@ -160,7 +171,7 @@ public final class eSpeakNG {
 
   private enum Constants {
     static let successAudioSampleRate = 22050
-    
+
     static let E2M: [(String, String)] = [
       ("ʔˌn\u{0329}", "tn"), ("ʔn\u{0329}", "tn"), ("ʔn", "tn"), ("ʔ", "t"),
       ("a^ɪ", "I"), ("a^ʊ", "W"),
