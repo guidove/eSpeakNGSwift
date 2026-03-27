@@ -30,6 +30,21 @@ public final class eSpeakNG {
     case hi = "hi"
     case it = "it"
     case pt = "pt-br"
+
+    /// Locale identifier for NumberFormatter
+    var localeIdentifier: String {
+      switch self {
+      case .none, .enUS: return "en_US"
+      case .enGB: return "en_GB"
+      case .ja: return "ja"
+      case .zh: return "zh_Hans"
+      case .es: return "es"
+      case .fr: return "fr"
+      case .hi: return "hi"
+      case .it: return "it"
+      case .pt: return "pt_BR"
+      }
+    }
   }
 
   // After constructing the wrapper, call setLanguage() before phonemizing any text
@@ -96,7 +111,8 @@ public final class eSpeakNG {
     self.language = language
   }
 
-  // Phonemizes the text string
+  // Phonemizes the text string, preserving punctuation for Kokoro pause tokens.
+  // Splits text on punctuation boundaries, phonemizes each clause, then reassembles with punctuation.
   public func phonemize(text: String) throws -> String {
     guard language != .none else {
       throw ESpeakNGEngineError.languageNotSet
@@ -106,24 +122,127 @@ public final class eSpeakNG {
       return ""
     }
 
+    // Spell out numbers before phonemizing
+    let preprocessed = Self.expandNumbers(text, language: language)
+    if preprocessed != text {
+      print("[eSpeakNG] expandNumbers: \"\(text.prefix(80))\" → \"\(preprocessed.prefix(80))\"")
+    }
+
+    // Split text into clauses at punctuation boundaries, preserving the punctuation marks
+    let clauses = Self.splitIntoClauses(preprocessed)
+
+    var phonemeResult: [String] = []
+
+    for clause in clauses {
+      if clause.count == 1 && ".!?;:,".contains(clause) {
+        // This is a punctuation mark — pass through directly as a Kokoro token
+        phonemeResult.append(clause)
+        continue
+      }
+
+      // Phonemize this clause via eSpeakNG
+      let phonemes = try phonemizeRaw(clause)
+      if !phonemes.isEmpty {
+        phonemeResult.append(phonemes)
+      }
+    }
+
+    if !phonemeResult.isEmpty {
+      let joined = phonemeResult.joined(separator: " ")
+      let processed = postProcessPhonemes(joined)
+      print("[eSpeakNG] phonemes: \"\(processed.prefix(150))\"")
+      return processed
+    } else {
+      throw ESpeakNGEngineError.couldNotPhonemize
+    }
+  }
+
+  /// Raw phonemization of a single clause (no punctuation handling)
+  private func phonemizeRaw(_ text: String) throws -> String {
     var textPtr = UnsafeRawPointer((text as NSString).utf8String)
     let phonemes_mode = Int32((Int32(Character("_").asciiValue!) << 8) | 0x02)
+
     let result = withUnsafeMutablePointer(to: &textPtr) { ptr in
       var resultWords: [String] = []
       while ptr.pointee != nil {
-        let result = ESpeakNG.espeak_TextToPhonemes(ptr, espeakCHARS_UTF8, phonemes_mode)
-        if let result {
-          resultWords.append(String(cString: result, encoding: .utf8)!)
+        let phonemes = ESpeakNG.espeak_TextToPhonemes(ptr, espeakCHARS_UTF8, phonemes_mode)
+        if let phonemes {
+          let word = String(cString: phonemes, encoding: .utf8)!
+          if !word.isEmpty {
+            resultWords.append(word)
+          }
         }
       }
       return resultWords
     }
 
-    if !result.isEmpty {
-      return postProcessPhonemes(result.joined(separator: " "))
-    } else {
-      throw ESpeakNGEngineError.couldNotPhonemize
+    return result.joined(separator: " ")
+  }
+
+  /// Split text into alternating [clause, punctuation, clause, punctuation, ...] parts
+  private static func splitIntoClauses(_ text: String) -> [String] {
+    var result: [String] = []
+    var current = ""
+
+    for ch in text {
+      if ".!?;:,".contains(ch) {
+        // Flush current clause
+        let trimmed = current.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
+          result.append(trimmed)
+        }
+        result.append(String(ch))
+        current = ""
+      } else {
+        current.append(ch)
+      }
     }
+
+    // Flush remaining text
+    let trimmed = current.trimmingCharacters(in: .whitespaces)
+    if !trimmed.isEmpty {
+      result.append(trimmed)
+    }
+
+    return result
+  }
+
+  /// Expand numbers to words for better TTS pronunciation, localized to the active language
+  private static func expandNumbers(_ text: String, language: Language) -> String {
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .spellOut
+    formatter.locale = Locale(identifier: language.localeIdentifier)
+
+    // Replace standalone numbers (integers and decimals) with their word form
+    let pattern = #"\b\d+(\.\d+)?\b"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+
+    var result = text
+    let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+
+    // Replace in reverse to preserve ranges
+    for match in matches.reversed() {
+      guard let range = Range(match.range, in: text) else { continue }
+      let numberStr = String(text[range])
+
+      if let number = Double(numberStr) {
+        if number == number.rounded() && !numberStr.contains(".") {
+          if let words = formatter.string(from: NSNumber(value: Int(number))) {
+            result.replaceSubrange(range, with: words)
+          }
+        } else {
+          // Decimal — spell out whole and fractional parts
+          let parts = numberStr.split(separator: ".")
+          if parts.count == 2,
+             let whole = Int(parts[0]),
+             let wholeWords = formatter.string(from: NSNumber(value: whole)) {
+            let decimalDigits = parts[1].map { String($0) }.joined(separator: " ")
+            result.replaceSubrange(range, with: "\(wholeWords) point \(decimalDigits)")
+          }
+        }
+      }
+    }
+    return result
   }
 
   // Post-process phonemes — English needs specific mappings, other languages pass through
